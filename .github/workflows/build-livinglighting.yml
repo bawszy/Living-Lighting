@@ -32,12 +32,17 @@ jobs:
           test -f source/LivingLighting/app/build.gradle.kts
           # API 37 is not published in the runner SDK feed; API 36 supports Fire TV builds.
           sed -i "s/compileSdk = 37/compileSdk = 36/; s/targetSdk = 37/targetSdk = 36/" source/LivingLighting/app/build.gradle.kts
+          # API 37 constants are not provided by API 36; use compatible literal constants.
+          sed -i 's/Manifest.permission.ACCESS_LOCAL_NETWORK/"android.permission.ACCESS_LOCAL_NETWORK"/; s/Build.VERSION_CODES.CINNAMON_BUN/37/' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/common/util/LocalNetworkAccess.kt
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Set up Android SDK from runner image
         shell: bash
