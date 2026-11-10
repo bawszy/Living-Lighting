@@ -1,0 +1,99 @@
+name: LivingLighting v2.1 - Fire TV remote fix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/firetv-remote-fix.yml'
+      - 'tools/patch_tv_remote.py'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: Check out LivingLighting source
+        uses: actions/checkout@v4
+
+      - name: Unpack Android project
+        run: |
+          test -s LivingLighting-v2-SOURCE.zip
+          mkdir -p source
+          unzip -q LivingLighting-v2-SOURCE.zip -d source
+          test -f source/LivingLighting/app/build.gradle.kts
+
+      - name: Apply Fire TV remote navigation and contrast fixes
+        run: |
+          python3 tools/patch_tv_remote.py source/LivingLighting
+          grep -q 'private fun TvEditField' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/ui/studio/StudioScreen.kt
+          grep -q 'darkColorScheme' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/ui/studio/StudioScreen.kt
+
+      - name: Prepare Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle dependencies
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          if [ -d "$ANDROID_HOME/platforms/android-37.0" ] && [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+            ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
+          fi
+
+      - name: Compile LivingLighting Android APK
+        working-directory: source/LivingLighting
+        env:
+          APP_VERSION_NAME: 2.2.1-livinglighting-tvremote
+          BUILD_NUMBER: '3'
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :app:assembleFullDebug
+
+      - name: Save APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LivingLighting-v2.1-FireTV-APK
+          path: source/LivingLighting/app/build/outputs/apk/full/debug/app-full-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create updated public GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp source/LivingLighting/app/build/outputs/apk/full/debug/app-full-debug.apk dist/LivingLighting-v2.1-FireTV.apk
+          unzip -p LivingLighting-v2-SOURCE.zip LivingLighting/LICENSE.txt > dist/LICENSE.txt
+          cat > notes.md <<'EOF'
+          LivingLighting v2.1 Fire TV beta — remote navigation and contrast update.
+
+          Fixes:
+          - Editable fields no longer summon the Fire TV keyboard merely when focused with the D-pad.
+          - Press Select on a field to open its editor, then select Apply or Cancel.
+          - LEFT and RIGHT scroll controls at the top of the screen move the corresponding column up/down.
+          - Text in inputs, dialogs and controls uses a high-contrast dark theme and visible focus outlines.
+          - Same WLED segment engine and independent mapping setup as the previous beta.
+
+          This beta APK was compiled automatically from the public LivingLighting source ZIP with the repository's TV navigation patch. It has not been device-tested yet. Keep Universal Ambient Light as your fallback.
+
+          IMPORTANT: Android debug builds produced on separate GitHub runners may have different signing keys. If Android refuses to update the previously installed LivingLighting beta, uninstall only LivingLighting, then install this APK. Your original Universal Ambient Light installation is unaffected. Uninstalling LivingLighting will reset its saved LivingLighting settings.
+
+          Based on Universal Ambient Light, under PolyForm Noncommercial 1.0.0. Personal noncommercial use only. See LICENSE.txt.
+          EOF
+          gh release create v2.1.0-beta dist/LivingLighting-v2.1-FireTV.apk dist/LICENSE.txt --title "LivingLighting v2.1 — Fire TV remote fixes" --notes-file notes.md --prerelease --target "$GITHUB_SHA"
+          gh release view v2.1.0-beta --json url,assets
