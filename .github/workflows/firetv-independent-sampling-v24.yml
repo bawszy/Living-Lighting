@@ -1,0 +1,135 @@
+name: LivingLighting v2.4 - Independent sampling and sliders
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/firetv-independent-sampling-v24.yml'
+      - 'tools/v24-v25-independent-sampling-and-sliders.tar.xz.base64'
+
+permissions:
+  contents: write
+
+jobs:
+  verify-build-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - name: Checkout LivingLighting source
+        uses: actions/checkout@v4
+
+      - name: Apply prior tested fixes and new five-zone sampler and slider patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source
+          unzip -q LivingLighting-v2-SOURCE.zip -d source
+          test -f source/LivingLighting/app/build.gradle.kts
+          python3 tools/patch_tv_remote.py source/LivingLighting
+          mkdir -p /tmp/patch-v22
+          base64 -d tools/v22-fixes.tar.gz.base64 | tar -xz -C /tmp/patch-v22
+          python3 /tmp/patch-v22/patch_autosave.py source/LivingLighting
+          python3 /tmp/patch-v22/patch_direction_test.py source/LivingLighting
+          base64 -d tools/v23-calibration-patch.py.xz.base64 | xz -d > /tmp/patch-v23.py
+          python3 /tmp/patch-v23.py source/LivingLighting
+          mkdir -p /tmp/patch-v24
+          base64 -d tools/v24-v25-independent-sampling-and-sliders.tar.xz.base64 | tar -xJf - -C /tmp/patch-v24
+          python3 /tmp/patch-v24/patch_v24_capture.py source/LivingLighting
+          python3 /tmp/patch-v24/patch_v25_sliders.py source/LivingLighting
+          grep -q 'StudioZoneMonitor' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/common/studio/StudioSegments.kt
+          grep -q 'CaptureBoundSlider' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/ui/studio/StudioScreen.kt
+          grep -q 'migrateLegacyShelves' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/common/studio/StudioSegments.kt
+
+      - name: Verify default zone lengths and slider guards
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          ranges = [(0,80),(80,160),(160,240),(240,354),(354,389)]
+          assert [end-start for start,end in ranges] == [80,80,80,114,35]
+          assert len({i for first,end in ranges for i in range(first,end)})==389
+          for left in range(0,100):
+            for right in range(left+1,101):
+              assert left<=right-1 and right>=left+1
+          print("Five zone boundaries and slider range constraints verified.")
+          PY
+
+      - name: Configure Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configure Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Android SDK and NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          if [ -d "$ANDROID_HOME/platforms/android-37.0" ] && [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+            ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
+          fi
+
+      - name: Run independent screen-sampling unit tests
+        working-directory: source/LivingLighting
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace :app:testFullDebugUnitTest
+
+      - name: Compile Fire TV APK
+        working-directory: source/LivingLighting
+        env:
+          APP_VERSION_NAME: 2.4.0-livinglighting-regions
+          BUILD_NUMBER: '6'
+        run: |
+          ./gradlew --no-daemon --stacktrace :app:assembleFullDebug
+
+      - name: Save APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LivingLighting-v2.4-FireTV-APK
+          path: source/LivingLighting/app/build/outputs/apk/full/debug/app-full-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp source/LivingLighting/app/build/outputs/apk/full/debug/app-full-debug.apk dist/LivingLighting-v2.4-FireTV.apk
+          unzip -p LivingLighting-v2-SOURCE.zip LivingLighting/LICENSE.txt > dist/LICENSE.txt
+          sha256sum dist/LivingLighting-v2.4-FireTV.apk
+          cat > release_notes.md <<'EOF'
+          LivingLighting v2.4 — independent capture regions and TV remote slider controls.
+
+          Screen capture regions:
+          - Each zone has its own independent screen sampling coordinates, source edge and effect.
+          - Selecting LEFT, RIGHT, TOP or BOTTOM quick source automatically selects Screen sync for that zone and uses the full screen.
+          - Selecting a crop area also selects Screen sync, sampling the selected rectangle.
+          - Four D-pad friendly sliders adjust LEFT/TOP/RIGHT/BOTTOM edges (0–100%), with -1/+1 buttons, live crop preview and immediate save.
+          - On-screen status clearly warns when an effect is overriding screen sync and shows recent output RGB generated by the actual capture mapper.
+          - Slider bounds prevent invalid rectangles and each slider affects only the currently selected zone.
+
+          Confirmed default zones (displayed LED numbers are 1-based):
+          - Right shelves: 1–80 (right edge)
+          - Bottom shelves: 81–160 (bottom edge)
+          - Left shelves: 161–240 (left edge)
+          - TV surround: 241–354 (perimeter)
+          - Lamp: 355–389 (average)
+          Existing default combined shelf zones migrate automatically if unchanged. A Split shelves button is provided if the original 1–240 zone was customized. TV and lamp settings are preserved during this migration.
+          - Keeps Live perimeter rainbow, LED offset controls, autosaving, and remote navigation from v2.1–v2.3.
+
+          Android debug beta; compiled in GitHub Actions and checked with unit tests, but screen sync and remote navigation still need testing on a Fire TV Stick. If an existing beta is signed with a different debug key, uninstall LivingLighting only before installing v2.4; uninstalling loses LivingLighting settings. Universal Ambient Light remains separate.
+
+          Based on Universal Ambient Light, PolyForm Noncommercial 1.0.0; noncommercial use only.
+          EOF
+          gh release create v2.4.0-beta dist/LivingLighting-v2.4-FireTV.apk dist/LICENSE.txt --title "LivingLighting v2.4 — Independent capture regions + sliders" --notes-file release_notes.md --prerelease --target "$GITHUB_SHA"
+          gh release view v2.4.0-beta --json url,assets
