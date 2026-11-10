@@ -41,10 +41,12 @@ jobs:
         shell: bash
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
-          command -v sdkmanager
-          sdkmanager --version
-          yes | sdkmanager --licenses || true
-          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+          if [ -z "$SDKMANAGER" ]; then echo "::error::Android SDK manager missing from runner image"; exit 1; fi
+          echo "Using $SDKMANAGER"
+          "$SDKMANAGER" --version
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
 
       - name: Build debug APK
         working-directory: source/LivingLighting
