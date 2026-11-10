@@ -14,17 +14,14 @@ permissions:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 55
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Verify source archive exists
         run: |
-          test -s LivingLighting-v2-SOURCE.zip || {
-            echo "::error::Upload LivingLighting-v2-SOURCE.zip to the repository root."
-            exit 1
-          }
+          test -s LivingLighting-v2-SOURCE.zip || { echo "::error::Missing source archive"; exit 1; }
           unzip -t LivingLighting-v2-SOURCE.zip >/dev/null
 
       - name: Unpack LivingLighting Android project
@@ -40,21 +37,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android platform and native tools
+      - name: Set up Android SDK from runner image
+        shell: bash
         run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          command -v sdkmanager
+          sdkmanager --version
           yes | sdkmanager --licenses || true
           sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
 
-      - name: Build signed debug APK
+      - name: Build debug APK
         working-directory: source/LivingLighting
         run: |
           chmod +x ./gradlew
           ./gradlew --no-daemon --stacktrace :app:assembleFullDebug
 
-      - name: Upload Android APK
+      - name: Upload installable APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
