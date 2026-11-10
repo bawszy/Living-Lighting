@@ -1,0 +1,64 @@
+name: Build LivingLighting Fire TV APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'LivingLighting-v2-SOURCE.zip'
+      - '.github/workflows/build-livinglighting.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify source archive exists
+        run: |
+          test -s LivingLighting-v2-SOURCE.zip || {
+            echo "::error::Upload LivingLighting-v2-SOURCE.zip to the repository root."
+            exit 1
+          }
+          unzip -t LivingLighting-v2-SOURCE.zip >/dev/null
+
+      - name: Unpack LivingLighting Android project
+        run: |
+          mkdir -p source
+          unzip -q LivingLighting-v2-SOURCE.zip -d source
+          test -f source/LivingLighting/gradlew
+          test -f source/LivingLighting/app/build.gradle.kts
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and native tools
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager "platforms;android-37" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+
+      - name: Build signed debug APK
+        working-directory: source/LivingLighting
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace :app:assembleFullDebug
+
+      - name: Upload Android APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LivingLighting-FireTV-APK
+          path: source/LivingLighting/app/build/outputs/apk/full/debug/app-full-debug.apk
+          if-no-files-found: error
+          retention-days: 30
