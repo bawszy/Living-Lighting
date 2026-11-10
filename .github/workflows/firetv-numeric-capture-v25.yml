@@ -1,0 +1,133 @@
+name: LivingLighting v2.5 - Numeric capture, screen guide and per-zone smoothing
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/firetv-numeric-capture-v25.yml'
+      - 'tools/v25-per-zone-smoothing.py.xz.base64'
+      - 'tools/v25-numeric-screen-only-guide.patch.py.xz.base64'
+
+permissions:
+  contents: write
+
+jobs:
+  verify-build-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - name: Check out LivingLighting repository
+        uses: actions/checkout@v4
+
+      - name: Unpack and patch LivingLighting
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source /tmp/ll-patches
+          unzip -q LivingLighting-v2-SOURCE.zip -d source
+          test -f source/LivingLighting/app/build.gradle.kts
+          python3 tools/patch_tv_remote.py source/LivingLighting
+          base64 -d tools/v22-fixes.tar.gz.base64 | tar -xz -C /tmp/ll-patches
+          python3 /tmp/ll-patches/patch_autosave.py source/LivingLighting
+          python3 /tmp/ll-patches/patch_direction_test.py source/LivingLighting
+          base64 -d tools/v23-calibration-patch.py.xz.base64 | xz -d > /tmp/ll-patches/patch_v23.py
+          python3 /tmp/ll-patches/patch_v23.py source/LivingLighting
+          base64 -d tools/v24-v25-independent-sampling-and-sliders.tar.xz.base64 | tar -xJf - -C /tmp/ll-patches
+          python3 /tmp/ll-patches/patch_v24_capture.py source/LivingLighting
+          python3 /tmp/ll-patches/patch_v25_sliders.py source/LivingLighting
+          base64 -d tools/v25-numeric-screen-only-guide.patch.py.xz.base64 | xz -d > /tmp/ll-patches/numeric_screen_guide.py
+          python3 /tmp/ll-patches/numeric_screen_guide.py source/LivingLighting
+          base64 -d tools/v25-per-zone-smoothing.py.xz.base64 | xz -d > /tmp/ll-patches/zone_smoothing.py
+          python3 /tmp/ll-patches/zone_smoothing.py source/LivingLighting
+
+      - name: Verify controls and capture behavior in generated source
+        shell: bash
+        run: |
+          set -euo pipefail
+          UI=source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/ui/studio/StudioScreen.kt
+          MAP=source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/common/studio/StudioSegments.kt
+          TEST=source/LivingLighting/app/src/test/java/com/vasmarfas/UniversalAmbientLight/common/studio/StudioMapperTest.kt
+          grep -Fq 'NumberSetting("Left %"' "$UI"
+          grep -Fq 'NumberSetting("Right %"' "$UI"
+          grep -Fq 'ZONE SMOOTHING' "$UI"
+          grep -Fq 'Show moving guide on TV' "$UI"
+          if grep -Fq 'CaptureBoundSlider' "$UI"; then echo "::error::Old buggy capture sliders remain"; exit 1; fi
+          grep -Fq 'val smoothing: Int' "$MAP"
+          grep -Fq '.put("smoothing", s.smoothing)' "$MAP"
+          grep -Fq 'else segment.smoothing / 100f' "$MAP"
+          grep -Fq 'different segments blend their colors using independent smoothing' "$TEST"
+          grep -Fq 'legacy rainbow test id does not override actual captured pixels' "$TEST"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configure Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK and NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          if [ -d "$ANDROID_HOME/platforms/android-37.0" ] && [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+            ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
+          fi
+
+      - name: Run independent sampling and per-zone smoothing tests
+        working-directory: source/LivingLighting
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace :app:testFullDebugUnitTest
+
+      - name: Assemble LivingLighting Fire TV APK
+        working-directory: source/LivingLighting
+        env:
+          APP_VERSION_NAME: 2.5.0-livinglighting
+          BUILD_NUMBER: '7'
+        run: |
+          ./gradlew --no-daemon --stacktrace :app:assembleFullDebug
+
+      - name: Upload APK as GitHub Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LivingLighting-v2.5-FireTV-APK
+          path: source/LivingLighting/app/build/outputs/apk/full/debug/app-full-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish public v2.5 GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp source/LivingLighting/app/build/outputs/apk/full/debug/app-full-debug.apk dist/LivingLighting-v2.5-FireTV.apk
+          unzip -p LivingLighting-v2-SOURCE.zip LivingLighting/LICENSE.txt > dist/LICENSE.txt
+          sha256sum dist/LivingLighting-v2.5-FireTV.apk
+          cat > release_notes.md <<'EOF'
+          LivingLighting v2.5 — numeric capture regions, on-screen-only rainbow guide, independent zone smoothing.
+
+          Fixes:
+          - Removed the buggy capture-region sliders. Each zone again has Left/Top/Right/Bottom numeric percentage fields, edited only after pressing Select.
+          - The moving rainbow is a reference drawn on the TV setup screen ONLY. It no longer sends an artificial rainbow effect to WLED.
+          - Legacy physical rainbow test IDs from earlier releases are ignored by the pixel mapper, allowing the LEDs to continue following actual captured screen pixels.
+          - Per-zone smoothing is now easy to find under ZONE SMOOTHING. Enter 0–95% or use 0/25/50/75/90 quick settings. Every zone saves and applies its smoothing independently.
+          - The existing 5-zone mapping stays: Right 1–80, Bottom 81–160, Left 161–240, TV 241–354, Lamp 355–389.
+          - All v2.4 independent source sampling, live output swatch, capture area presets and v2.3 LED offset remain.
+
+          How to test: Select a zone, set Effect to Screen, choose its capture region and numeric bounds. Choose a smoothing amount for that zone. Turn on the moving on-screen guide if wanted; it is not an LED rainbow effect. Start screen capture and enable Independent LED mapping to see the live captured colors.
+
+          Tested by compiling and running unit tests in GitHub Actions. Not yet tested on an actual Fire TV Stick. A new debug signing certificate may require uninstalling LivingLighting before installing; uninstalling will reset its local settings. The original Universal Ambient Light app is separate.
+
+          Based on Universal Ambient Light, PolyForm Noncommercial 1.0.0; personal noncommercial use only.
+          EOF
+          gh release create v2.5.0-beta dist/LivingLighting-v2.5-FireTV.apk dist/LICENSE.txt --title "LivingLighting v2.5 — Numeric regions and zone smoothing" --notes-file release_notes.md --prerelease --target "$GITHUB_SHA"
+          gh release view v2.5.0-beta --json url,assets
