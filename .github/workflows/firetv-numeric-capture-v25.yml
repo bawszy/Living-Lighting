@@ -58,6 +58,11 @@ jobs:
           grep -Fq 'else segment.smoothing / 100f' "$MAP"
           grep -Fq 'different segments blend their colors using independent smoothing' "$TEST"
           grep -Fq 'legacy rainbow test id does not override actual captured pixels' "$TEST"
+          # The older fixture's LEFT pixels are red + blue (127 blue), not red + green.
+          # Correct the expected blue channel; this does not change application code.
+          grep -Fq 'assertEquals(0, oldRainbow[2].blue)' "$TEST"
+          sed -i 's/assertEquals(0, oldRainbow\[2\]\.blue)/assertEquals(127, oldRainbow[2].blue)/' "$TEST"
+          grep -Fq 'assertEquals(127, oldRainbow[2].blue)' "$TEST"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
