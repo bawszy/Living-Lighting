@@ -1,0 +1,128 @@
+name: LivingLighting v2.3 - Live TV edge calibration
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/firetv-calibration-v23.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Unpack source and apply all patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s LivingLighting-v2-SOURCE.zip
+          mkdir -p source
+          unzip -q LivingLighting-v2-SOURCE.zip -d source
+          test -f source/LivingLighting/app/build.gradle.kts
+          python3 tools/patch_tv_remote.py source/LivingLighting
+          mkdir -p /tmp/ll-patches
+          base64 -d tools/v22-fixes.tar.gz.base64 | tar -xz -C /tmp/ll-patches
+          python3 /tmp/ll-patches/patch_autosave.py source/LivingLighting
+          python3 /tmp/ll-patches/patch_direction_test.py source/LivingLighting
+          base64 -d tools/v23-calibration-patch.py.xz.base64 | xz -d > /tmp/patch_v23.py
+          python3 /tmp/patch_v23.py source/LivingLighting
+          grep -q 'FullScreenRainbowFrame' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/ui/studio/StudioScreen.kt
+          grep -q 'fun sourceIndex' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/common/studio/StudioSegments.kt
+          grep -q 'testStartedMs' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/common/network/WLEDClient.kt
+
+      - name: Verify live index mapping math
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          for n in (1, 35, 114, 240):
+              for shift in (-3, -1, 0, 1, 33, 115):
+                  for reverse in (False, True):
+                      positions=[((n-1-i if reverse else i)+shift)%n for i in range(n)]
+                      assert sorted(positions)==list(range(n)), (n,shift,reverse)
+          print("LED offset/reverse mapping is a full permutation: OK")
+          PY
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Android tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          if [ -d "$ANDROID_HOME/platforms/android-37.0" ] && [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+            ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
+          fi
+
+      - name: Compile Android APK
+        working-directory: source/LivingLighting
+        env:
+          APP_VERSION_NAME: 2.3.0-livinglighting-calibration
+          BUILD_NUMBER: '5'
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :app:assembleFullDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LivingLighting-v2.3-FireTV-APK
+          path: source/LivingLighting/app/build/outputs/apk/full/debug/app-full-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish public GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp source/LivingLighting/app/build/outputs/apk/full/debug/app-full-debug.apk dist/LivingLighting-v2.3-FireTV.apk
+          unzip -p LivingLighting-v2-SOURCE.zip LivingLighting/LICENSE.txt > dist/LICENSE.txt
+          sha256sum dist/LivingLighting-v2.3-FireTV.apk
+          cat > release_notes.md <<'EOF'
+          LivingLighting v2.3 — live TV-edge calibration beta.
+
+          New:
+          - A continuously moving rainbow preview in Independent LED segments.
+          - While the rainbow LED test is active, the same rainbow animates around the whole outer edge of the TV screen with settings still visible.
+          - A physical WLED rainbow test that matches the on-screen rainbow, selected segment only.
+          - Per-segment saved start offset in LED steps: -10, -1, +1, +10, numeric entry, and reset.
+          - Approximate top-left, top-right, bottom-right, bottom-left start-corner presets, adjustable one LED at a time.
+          - Reverse LED direction available next to the calibration preview.
+          - Physical direction chase now starts predictably at the LED strip endpoint rather than a wall-clock-based arbitrary position.
+          - The per-segment offset is persisted with the rest of the mapping and applies to normal TV sync AND independent effects.
+          - Retains v2.2 persistent saves and v2.1 Fire TV remote and text-contrast fixes.
+
+          To calibrate:
+          1. Open Independent LED segments and select TV (LEDs 241–354).
+          2. Enable Independent LED mapping and begin screen capture; connect to WLED.
+          3. Press Start rainbow on LEDs. The outer edge of the display and selected TV strip show a moving rainbow.
+          4. Press +/-10 and +/-1 to align the physical LEDs to the edge positions. Toggle Reverse if the sweep moves the wrong way.
+          5. Press Stop rainbow on LEDs to return to normal picture sampling. Settings auto-save.
+
+          The release is a debug beta compiled successfully in GitHub Actions, not yet tested on physical Fire TV hardware. A previous debug build may have a different signing key; if Android rejects an in-place update, uninstall LivingLighting only, then install this build. The original Universal Ambient Light app is separate and unaffected.
+
+          Physical LED output requires screen capture running with WLED connected. The preview alone still animates when capture is stopped. DRM restrictions are unchanged.
+
+          Based on Universal Ambient Light under PolyForm Noncommercial 1.0.0, personal noncommercial use only. See LICENSE.txt.
+          EOF
+          gh release create v2.3.0-beta dist/LivingLighting-v2.3-FireTV.apk dist/LICENSE.txt --title "LivingLighting v2.3 — Live TV-edge calibration" --notes-file release_notes.md --prerelease --target "$GITHUB_SHA"
+          gh release view v2.3.0-beta --json url,assets
