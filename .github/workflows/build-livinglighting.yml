@@ -30,6 +30,8 @@ jobs:
           unzip -q LivingLighting-v2-SOURCE.zip -d source
           test -f source/LivingLighting/gradlew
           test -f source/LivingLighting/app/build.gradle.kts
+          # API 37 is not published in the runner SDK feed; API 36 supports Fire TV builds.
+          sed -i "s/compileSdk = 37/compileSdk = 36/; s/targetSdk = 37/targetSdk = 36/" source/LivingLighting/app/build.gradle.kts
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -46,7 +48,7 @@ jobs:
           echo "Using $SDKMANAGER"
           "$SDKMANAGER" --version
           yes | "$SDKMANAGER" --licenses || true
-          "$SDKMANAGER" "platforms;android-37" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
 
       - name: Build debug APK
         working-directory: source/LivingLighting
