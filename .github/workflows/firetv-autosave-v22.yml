@@ -1,0 +1,108 @@
+name: LivingLighting v2.2 - Save and apply segment fixes
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/firetv-autosave-v22.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Unpack LivingLighting Android source
+        run: |
+          set -euo pipefail
+          test -s LivingLighting-v2-SOURCE.zip
+          mkdir -p source
+          unzip -q LivingLighting-v2-SOURCE.zip -d source
+          test -f source/LivingLighting/app/build.gradle.kts
+
+      - name: Apply Fire TV D-pad interface patch and v2.2 save fixes
+        run: |
+          set -euo pipefail
+          python3 tools/patch_tv_remote.py source/LivingLighting
+          mkdir -p /tmp/ll-patches
+          base64 -d tools/v22-fixes.tar.gz.base64 | tar -xz -C /tmp/ll-patches
+          python3 /tmp/ll-patches/patch_autosave.py source/LivingLighting
+          python3 /tmp/ll-patches/patch_direction_test.py source/LivingLighting
+          rg 'SAVED \+ LIVE|Test actual LED direction' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/ui/studio/StudioScreen.kt || grep -E 'SAVED . LIVE|Test actual LED direction' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/ui/studio/StudioScreen.kt
+          grep -q 'commit()' source/LivingLighting/app/src/main/java/com/vasmarfas/UniversalAmbientLight/common/studio/StudioSegments.kt
+
+      - name: Configure Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Android SDK and NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          if [ -d "$ANDROID_HOME/platforms/android-37.0" ] && [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+            ln -s android-37.0 "$ANDROID_HOME/platforms/android-37"
+          fi
+
+      - name: Compile Android Fire TV APK
+        working-directory: source/LivingLighting
+        env:
+          APP_VERSION_NAME: 2.2.2-livinglighting-autosave
+          BUILD_NUMBER: '4'
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace :app:assembleFullDebug
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LivingLighting-v2.2-FireTV-APK
+          path: source/LivingLighting/app/build/outputs/apk/full/debug/app-full-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish updated public GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp source/LivingLighting/app/build/outputs/apk/full/debug/app-full-debug.apk dist/LivingLighting-v2.2-FireTV.apk
+          unzip -p LivingLighting-v2-SOURCE.zip LivingLighting/LICENSE.txt > dist/LICENSE.txt
+          test -s dist/LivingLighting-v2.2-FireTV.apk
+          sha256sum dist/LivingLighting-v2.2-FireTV.apk
+          cat > release_notes.md <<'EOF'
+          LivingLighting v2.2 — Fire TV custom LED mapping save and activation fixes.
+
+          Changes:
+          - Valid zone edits automatically persist to device storage.
+          - Explicit SAVED + LIVE or NOT SAVED messages appear near controls.
+          - Save & activate LEDs enables custom mapping and applies current mapping to running screen capture.
+          - Save failures and invalid or overlapping ranges are no longer silent.
+          - New Test actual LED direction button runs a moving green pixel along a selected physical segment; Reverse LED direction changes its travel direction.
+          - Fire TV D-pad focus and high-contrast text updates from v2.1 retained.
+          - Same custom source mapping and WLED segment system.
+
+          The updated release compiles successfully in GitHub Actions but still needs testing on the Fire TV hardware. Moving-pixel direction test requires screen capture to be running. Solid colors and average screen sampling do not visibly change when reversed.
+
+          This is a signed debug beta. An existing debug APK signed by a previous GitHub runner may not accept an in-place update. If installation shows App not installed, uninstall LivingLighting only and install this APK. Uninstalling resets saved LivingLighting settings. Universal Ambient Light remains unaffected.
+
+          Based on Universal Ambient Light under PolyForm Noncommercial 1.0.0, personal noncommercial use only. See LICENSE.txt.
+          EOF
+          gh release create v2.2.0-beta dist/LivingLighting-v2.2-FireTV.apk dist/LICENSE.txt --title "LivingLighting v2.2 — LED mapping save fixes" --notes-file release_notes.md --prerelease --target "$GITHUB_SHA"
+          gh release view v2.2.0-beta --json url,assets
